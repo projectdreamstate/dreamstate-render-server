@@ -34,8 +34,53 @@ def download(url, dest_path):
             f.write(chunk)
 
 
+def probe_streams(path):
+    """Return a list of stream codec_types ('video'/'audio') ffprobe finds in a file."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "stream=codec_type",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path
+        ],
+        capture_output=True, text=True, timeout=30
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def validate_asset(path, url, kind):
+    """Make sure a downloaded asset is real media, not an empty file or an HTML/JSON
+    error page that came back with a 200. Raises ValueError with a clear message."""
+    size = os.path.getsize(path) if os.path.exists(path) else 0
+    if size < 1024:
+        # Show the first bytes so we can see if it's an error page rather than media.
+        head = ""
+        try:
+            with open(path, "rb") as f:
+                head = f.read(200).decode("utf-8", "replace")
+        except Exception:
+            pass
+        raise ValueError(
+            f"{kind} asset is only {size} bytes (likely a 404/placeholder, not media). "
+            f"URL: {url} | first bytes: {head!r}"
+        )
+
+    streams = probe_streams(path)
+    if kind == "visual":
+        if "video" not in streams:
+            raise ValueError(
+                f"visual is not a decodable image/video (ffprobe streams={streams}). "
+                f"Check that this Cloudinary URL points at a real image: {url}"
+            )
+    else:  # audio / music / voice
+        if "audio" not in streams:
+            raise ValueError(
+                f"{kind} has no audio stream (ffprobe streams={streams}). URL: {url}"
+            )
+
+
 def get_duration(path):
-    """Get audio duration in seconds using ffprobe."""
+    """Get media duration in seconds using ffprobe."""
     result = subprocess.run(
         [
             "ffprobe", "-v", "error",
@@ -45,7 +90,11 @@ def get_duration(path):
         ],
         capture_output=True, text=True, timeout=30
     )
-    return float(result.stdout.strip())
+    raw = result.stdout.strip()
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(f"could not read a duration from {path} (ffprobe returned {raw!r})")
 
 
 def build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, duration):
@@ -58,14 +107,20 @@ def build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, dur
         "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[vout]"
     )
 
+    # -nostats + -loglevel error: keep stderr to the *real* error instead of
+    # thousands of "frame=0" progress lines that bury it.
+    base = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats", "-y"]
+
     if mode == "frequency":
         # Music only — no voiceover
-        return [
-            "ffmpeg", "-y",
-            "-loop", "1", "-i", visual_path,
+        return base + [
+            "-loop", "1", "-framerate", "25", "-i", visual_path,
             "-i", music_path,
             "-filter_complex",
-            f"[0:v]{scale_filter};[1:a]volume={volumes['music']}[aout]",
+            (
+                f"[0:v]{scale_filter};"
+                f"[1:a]volume={volumes['music']}[aout]"
+            ),
             "-map", "[vout]", "-map", "[aout]",
             "-c:v", "libx264", "-tune", "stillimage", "-preset", "fast", "-crf", "23",
             "-c:a", "aac", "-b:a", "192k",
@@ -75,9 +130,8 @@ def build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, dur
         ]
     else:
         # Voiceover + background music mixed
-        return [
-            "ffmpeg", "-y",
-            "-loop", "1", "-i", visual_path,
+        return base + [
+            "-loop", "1", "-framerate", "25", "-i", visual_path,
             "-i", voice_path,
             "-i", music_path,
             "-filter_complex",
@@ -124,9 +178,11 @@ def render():
             music_path  = os.path.join(tmpdir, "music.mp3")
             output_path = os.path.join(tmpdir, "output.mp4")
 
-            # Download assets
+            # Download + validate assets (clear errors instead of an opaque ffmpeg failure)
             download(video_url, visual_path)
+            validate_asset(visual_path, video_url, "visual")
             download(music_url, music_path)
+            validate_asset(music_path, music_url, "music")
 
             if mode == "frequency":
                 duration = get_duration(music_path)
@@ -134,7 +190,14 @@ def render():
             else:
                 voice_path = os.path.join(tmpdir, "voice.mp3")
                 download(audio_url, voice_path)
+                validate_asset(voice_path, audio_url, "voice")
                 duration = get_duration(voice_path)
+
+            if not duration or duration < 0.5:
+                return jsonify({
+                    "error": f"render aborted: computed duration is {duration!r} "
+                             f"(audio is empty or unreadable), which would produce 0 frames."
+                }), 500
 
             # Build and run ffmpeg
             cmd = build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, duration)
@@ -143,7 +206,7 @@ def render():
             if result.returncode != 0:
                 return jsonify({
                     "error": "ffmpeg failed",
-                    "details": result.stderr[-2000:]  # last 2000 chars of stderr
+                    "details": result.stderr[-4000:]  # real error now that progress is silenced
                 }), 500
 
             # Upload rendered video to Cloudinary
