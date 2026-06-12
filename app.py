@@ -34,6 +34,43 @@ def download(url, dest_path):
             f.write(chunk)
 
 
+def transcribe_to_srt(voice_path, dest_path):
+    """Send the voiceover to OpenAI Whisper and write back a timed .srt file.
+
+    Used to burn synced captions onto affirmation / meditation videos. The
+    voiceover audio already exists in Cloudinary, so we transcribe that
+    existing file rather than generating speech here.
+
+    Requires the OPENAI_API_KEY env var (set in Railway).
+    """
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "captions were requested but OPENAI_API_KEY is not set. "
+            "Add it as a Railway variable to enable transcription."
+        )
+
+    with open(voice_path, "rb") as f:
+        resp = requests.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": ("voice.mp3", f, "audio/mpeg")},
+            data={"model": "whisper-1", "response_format": "srt"},
+            timeout=300,
+        )
+    if resp.status_code != 200:
+        raise ValueError(
+            f"Whisper transcription failed ({resp.status_code}): {resp.text[:500]}"
+        )
+
+    srt = resp.text
+    if not srt.strip():
+        raise ValueError("Whisper returned an empty transcript; no captions to burn.")
+
+    with open(dest_path, "w", encoding="utf-8") as out:
+        out.write(srt)
+
+
 def probe_streams(path):
     """Return a list of stream codec_types ('video'/'audio') ffprobe finds in a file."""
     result = subprocess.run(
@@ -212,12 +249,18 @@ def render():
                              f"(audio is empty or unreadable), which would produce 0 frames."
                 }), 500
 
-            # Optional subtitle/caption track (synced affirmation lyrics)
+            # Optional subtitle/caption track (synced affirmation lyrics).
+            # subtitle_url wins; otherwise, if captions are requested, transcribe
+            # the voiceover with Whisper into a timed SRT and burn it in.
             subtitle_path = None
             subtitle_url = data.get("subtitle_url")
+            want_captions = data.get("captions") or data.get("subtitles")
             if subtitle_url:
                 subtitle_path = os.path.join(tmpdir, "subs.srt")
                 download(subtitle_url, subtitle_path)
+            elif want_captions and voice_path:
+                subtitle_path = os.path.join(tmpdir, "subs.srt")
+                transcribe_to_srt(voice_path, subtitle_path)
 
             # Build and run ffmpeg
             cmd = build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, duration, subtitle_path)
