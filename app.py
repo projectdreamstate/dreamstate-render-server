@@ -97,14 +97,25 @@ def get_duration(path):
         raise ValueError(f"could not read a duration from {path} (ffprobe returned {raw!r})")
 
 
-def build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, duration):
+def build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, duration, subtitle_path=None):
     """Build the ffmpeg command for the given mode."""
     volumes = VOLUME_MODES.get(mode, VOLUME_MODES["meditation"])
 
     # Scale + pad visual to 1920x1080 with black bars if needed
+    # Optional burned-in captions (synced affirmation lyrics). On Linux the
+    # temp path has no ":" so it needs no extra filtergraph escaping.
+    sub = ""
+    if subtitle_path:
+        sub = (
+            ",subtitles=" + subtitle_path +
+            ":force_style='FontName=DejaVu Sans,Fontsize=18,"
+            "PrimaryColour=&H00FFFFFF&,OutlineColour=&H00000000&,"
+            "BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=60'"
+        )
     scale_filter = (
         "scale=1280:720:force_original_aspect_ratio=decrease,"
-        "pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1[vout]"
+        "pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1"
+        + sub + "[vout]"
     )
 
     # -nostats + -loglevel error: keep stderr to the *real* error instead of
@@ -201,8 +212,15 @@ def render():
                              f"(audio is empty or unreadable), which would produce 0 frames."
                 }), 500
 
+            # Optional subtitle/caption track (synced affirmation lyrics)
+            subtitle_path = None
+            subtitle_url = data.get("subtitle_url")
+            if subtitle_url:
+                subtitle_path = os.path.join(tmpdir, "subs.srt")
+                download(subtitle_url, subtitle_path)
+
             # Build and run ffmpeg
-            cmd = build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, duration)
+            cmd = build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, duration, subtitle_path)
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
 
             if result.returncode != 0:
