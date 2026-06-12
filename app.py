@@ -138,9 +138,9 @@ def build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, dur
             "-filter_complex",
             (
                 f"[0:v]{scale_filter};"
-                f"[1:a]volume={volumes['voice']}[v];"
+                f"[1:a]dynaudnorm=f=200:g=8,volume={volumes['voice']}[v];"
                 f"[2:a]volume={volumes['music']}[m];"
-                f"[v][m]amix=inputs=2:duration=first[aout]"
+                f"[v][m]amix=inputs=2:duration=first:normalize=0[aout]"
             ),
             "-map", "[vout]", "-map", "[aout]",
             "-c:v", "libx264", "-tune", "stillimage", "-preset", "ultrafast", "-crf", "23",
