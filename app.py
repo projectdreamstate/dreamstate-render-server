@@ -103,8 +103,8 @@ def build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, dur
 
     # Scale + pad visual to 1920x1080 with black bars if needed
     scale_filter = (
-        "scale=1920:1080:force_original_aspect_ratio=decrease,"
-        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[vout]"
+        "scale=1280:720:force_original_aspect_ratio=decrease,"
+        "pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1[vout]"
     )
 
     # -nostats + -loglevel error: keep stderr to the *real* error instead of
@@ -114,7 +114,7 @@ def build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, dur
     if mode == "frequency":
         # Music only — no voiceover
         return base + [
-            "-loop", "1", "-framerate", "25", "-i", visual_path,
+            "-loop", "1", "-framerate", "2", "-i", visual_path,
             "-i", music_path,
             "-filter_complex",
             (
@@ -122,16 +122,17 @@ def build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, dur
                 f"[1:a]volume={volumes['music']}[aout]"
             ),
             "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-tune", "stillimage", "-preset", "fast", "-crf", "23",
+            "-c:v", "libx264", "-tune", "stillimage", "-preset", "ultrafast", "-crf", "23",
             "-c:a", "aac", "-b:a", "192k",
             "-pix_fmt", "yuv420p",
+            "-r", "2",
             "-t", str(duration),
             output_path
         ]
     else:
         # Voiceover + background music mixed
         return base + [
-            "-loop", "1", "-framerate", "25", "-i", visual_path,
+            "-loop", "1", "-framerate", "2", "-i", visual_path,
             "-i", voice_path,
             "-i", music_path,
             "-filter_complex",
@@ -142,9 +143,10 @@ def build_ffmpeg_cmd(mode, visual_path, voice_path, music_path, output_path, dur
                 f"[v][m]amix=inputs=2:duration=first[aout]"
             ),
             "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-tune", "stillimage", "-preset", "fast", "-crf", "23",
+            "-c:v", "libx264", "-tune", "stillimage", "-preset", "ultrafast", "-crf", "23",
             "-c:a", "aac", "-b:a", "192k",
             "-pix_fmt", "yuv420p",
+            "-r", "2",
             "-t", str(duration),
             output_path
         ]
@@ -206,7 +208,8 @@ def render():
             if result.returncode != 0:
                 return jsonify({
                     "error": "ffmpeg failed",
-                    "details": result.stderr[-4000:]  # real error now that progress is silenced
+                    "returncode": result.returncode,
+                    "details": result.stderr[-4000:] or "(ffmpeg printed no error. A negative returncode such as -9 means the OS killed the process, almost always out-of-memory on the host.)"
                 }), 500
 
             # Upload rendered video to Cloudinary
